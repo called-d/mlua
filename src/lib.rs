@@ -194,6 +194,9 @@ pub use mlua_derive::lua_module;
 #[cfg(all(feature = "module", feature = "send"))]
 compile_error!("`send` feature is not supported in module mode");
 
+#[cfg(all(feature = "lua54", feature = "vendored"))]
+pub mod jail;
+
 pub(crate) mod private {
     use super::*;
 

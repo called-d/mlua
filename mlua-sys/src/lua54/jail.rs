@@ -1,31 +1,64 @@
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_void, c_int};
+use std::os::raw::{c_char, c_int, c_uchar};
 use crate::{lua_CFunction, lua_State};
 
-pub(crate) type lua_ModifyFunction = unsafe extern "C-unwind" fn(L: *mut lua_State);
+pub type lua_ModifyFunction = unsafe extern "C-unwind" fn(L: *mut lua_State);
+
+/// `DebugLibJailOption` in jail.h
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub(crate) struct StructDebugLibOption {
-    pub deny_debug: u8,
-    pub deny_getuservalue: u8,
-    pub deny_gethook: u8,
-    pub deny_getinfo: u8,
-    pub deny_getlocal: u8,
-    pub deny_getregistry: u8,
-    pub deny_getmetatable: u8,
-    pub deny_getupvalue: u8,
-    pub deny_upvaluejoin: u8,
-    pub deny_upvalueid: u8,
-    pub deny_setuservalue: u8,
-    pub deny_sethook: u8,
-    pub deny_setlocal: u8,
-    pub deny_setmetatable: u8,
-    pub deny_setupvalue: u8,
-    pub deny_traceback: u8,
-    pub deny_setcstacklimit: u8,
+#[derive(Debug, Default, Copy, Clone)]
+pub struct DebugLibJailOption {
+    pub deny_debug: c_uchar,
+    pub deny_getuservalue: c_uchar,
+    pub deny_gethook: c_uchar,
+    pub deny_getinfo: c_uchar,
+    pub deny_getlocal: c_uchar,
+    pub deny_getregistry: c_uchar,
+    pub deny_getmetatable: c_uchar,
+    pub deny_getupvalue: c_uchar,
+    pub deny_upvaluejoin: c_uchar,
+    pub deny_upvalueid: c_uchar,
+    pub deny_setuservalue: c_uchar,
+    pub deny_sethook: c_uchar,
+    pub deny_setlocal: c_uchar,
+    pub deny_setmetatable: c_uchar,
+    pub deny_setupvalue: c_uchar,
+    pub deny_traceback: c_uchar,
+    pub deny_setcstacklimit: c_uchar,
 }
 
-#[derive(Debug, Default)]
+/// `JailOption` in jail.h. Strings are copied by `lua_setjail`.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct JailOption {
+    pub loadfile_root: *const c_char,
+    pub ioroot: *const c_char,
+    pub read_extension_allowlist: *const c_char,
+    pub write_extension_allowlist: *const c_char,
+    pub getenv_prefix: *const c_char,
+    pub path_override: *const c_char,
+    pub cpath_override: *const c_char,
+    pub package_searchers_modifier: Option<lua_ModifyFunction>,
+    pub clock_overwrite: Option<lua_CFunction>,
+    pub rep_max: usize,
+    pub rep_max_limited: c_int,
+    pub clock_precision: c_int,
+    pub deny_load_stdin: c_uchar,
+    pub deny_open_stdin: c_uchar,
+    pub deny_popen: c_uchar,
+    pub deny_exit: c_uchar,
+    pub deny_tmp: c_uchar,
+    pub deny_getenv: c_uchar,
+    pub deny_setlocale: c_uchar,
+    pub deny_collectgarbage: c_uchar,
+    pub deny_require: c_uchar,
+    pub deny_loadlib: c_uchar,
+    pub deny_searchpath: c_uchar,
+    pub deny_time: c_uchar,
+    pub debug_option: DebugLibJailOption,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct DebugLibOption {
     pub deny_debug: bool,
     pub deny_getuservalue: bool,
@@ -68,80 +101,59 @@ impl DebugLibOption {
         }
     }
 }
-
-#[cfg_attr(all(windows, raw_dylib), link(name = "lua54", kind = "raw-dylib"))]
-unsafe extern "C-unwind" {
-    pub fn set_loadfileroot(fileroot: *const c_char) -> *mut c_char;
-    pub fn set_ioroot(fileroot: *const c_char) -> *mut c_char;
-    pub fn deny_load_stdin() -> c_void;
-    pub fn allow_load_stdin() -> c_void;
-    pub fn deny_open_stdin() -> c_void;
-    pub fn allow_open_stdin() -> c_void;
-    pub fn deny_popen() -> c_void;
-    pub fn allow_popen() -> c_void;
-    pub fn deny_exit() -> c_void;
-    pub fn allow_exit() -> c_void;
-    pub fn deny_tmp() -> c_void;
-    pub fn allow_tmp() -> c_void;
-    pub fn deny_getenv() -> c_void;
-    pub fn allow_getenv() -> c_void;
-    pub fn set_getenv_prefix(prefix: *const c_char) -> *mut c_char;
-    pub fn deny_setlocale() -> c_void;
-    pub fn allow_setlocale() -> c_void;
-    pub fn deny_collectgarbage() -> c_void;
-    pub fn allow_collectgarbage() -> c_void;
-    pub fn deny_require() -> c_void;
-    pub fn allow_require() -> c_void;
-    pub fn deny_loadlib() -> c_void;
-    pub fn allow_loadlib() -> c_void;
-    pub fn deny_searchpath() -> c_void;
-    pub fn allow_searchpath() -> c_void;
-    pub fn set_path_override(path_override: *const c_char) -> *mut c_char;
-    pub fn set_cpath_override(cpath_override: *const c_char) -> *mut c_char;
-    pub fn set_package_searchers_modifier_func(f: Option<lua_ModifyFunction>) -> Option<lua_ModifyFunction>;
-    fn set_deny_debug_lib(deny_list: StructDebugLibOption) -> c_void;
-
-    pub fn deny_time() -> c_void;
-    pub fn allow_time() -> c_void;
-    pub fn set_rep_max(max: usize) -> c_void;
-    pub fn reset_rep_max() -> c_void;
-    pub fn set_clock_precision(p: c_int) -> c_void;
-    pub fn set_clock_overwrite(f: Option<lua_CFunction>) -> Option<lua_CFunction>;
-    // pub fn deny_binary_io() -> c_void;
-    // pub fn allow_binary_io() -> c_void;
-    pub fn set_read_extension_allowlist(list: *const c_char) -> *mut c_char;
-    pub fn set_write_extension_allowlist(list: *const c_char) -> *mut c_char;
-}
-
-pub fn set_debug_lib_option(deny_list: DebugLibOption) {
-    unsafe {
-        set_deny_debug_lib(StructDebugLibOption {
-            deny_debug: if deny_list.deny_debug { 1 } else { 0 },
-            deny_getuservalue: if deny_list.deny_getuservalue { 1 } else { 0 },
-            deny_gethook: if deny_list.deny_gethook { 1 } else { 0 },
-            deny_getinfo: if deny_list.deny_getinfo { 1 } else { 0 },
-            deny_getlocal: if deny_list.deny_getlocal { 1 } else { 0 },
-            deny_getregistry: if deny_list.deny_getregistry { 1 } else { 0 },
-            deny_getmetatable: if deny_list.deny_getmetatable { 1 } else { 0 },
-            deny_getupvalue: if deny_list.deny_getupvalue { 1 } else { 0 },
-            deny_upvaluejoin: if deny_list.deny_upvaluejoin { 1 } else { 0 },
-            deny_upvalueid: if deny_list.deny_upvalueid { 1 } else { 0 },
-            deny_setuservalue: if deny_list.deny_setuservalue { 1 } else { 0 },
-            deny_sethook: if deny_list.deny_sethook { 1 } else { 0 },
-            deny_setlocal: if deny_list.deny_setlocal { 1 } else { 0 },
-            deny_setmetatable: if deny_list.deny_setmetatable { 1 } else { 0 },
-            deny_setupvalue: if deny_list.deny_setupvalue { 1 } else { 0 },
-            deny_traceback: if deny_list.deny_traceback { 1 } else { 0 },
-            deny_setcstacklimit: if deny_list.deny_setcstacklimit { 1 } else { 0 },
-        });
+impl From<&DebugLibOption> for DebugLibJailOption {
+    fn from(o: &DebugLibOption) -> Self {
+        Self {
+            deny_debug: o.deny_debug as c_uchar,
+            deny_getuservalue: o.deny_getuservalue as c_uchar,
+            deny_gethook: o.deny_gethook as c_uchar,
+            deny_getinfo: o.deny_getinfo as c_uchar,
+            deny_getlocal: o.deny_getlocal as c_uchar,
+            deny_getregistry: o.deny_getregistry as c_uchar,
+            deny_getmetatable: o.deny_getmetatable as c_uchar,
+            deny_getupvalue: o.deny_getupvalue as c_uchar,
+            deny_upvaluejoin: o.deny_upvaluejoin as c_uchar,
+            deny_upvalueid: o.deny_upvalueid as c_uchar,
+            deny_setuservalue: o.deny_setuservalue as c_uchar,
+            deny_sethook: o.deny_sethook as c_uchar,
+            deny_setlocal: o.deny_setlocal as c_uchar,
+            deny_setmetatable: o.deny_setmetatable as c_uchar,
+            deny_setupvalue: o.deny_setupvalue as c_uchar,
+            deny_traceback: o.deny_traceback as c_uchar,
+            deny_setcstacklimit: o.deny_setcstacklimit as c_uchar,
+        }
     }
 }
 
+#[cfg_attr(all(windows, raw_dylib), link(name = "lua54", kind = "raw-dylib"))]
+unsafe extern "C-unwind" {
+    /// Copies `opt` into the state (null clears). Returns non-zero on failure.
+    pub fn lua_setjail(L: *mut lua_State, opt: *const JailOption, size: usize) -> c_int;
+    /// Never null. All zero if not jailed.
+    pub fn lua_getjail(L: *mut lua_State) -> *const JailOption;
+}
+
+/// Called from jail.c
 #[unsafe(no_mangle)] pub extern "C" fn is_in_dir (rootdir: *const c_char, f: *const c_char) -> c_int {
-    use std::path::{Path, absolute};
-    let rootdir = absolute(Path::new(unsafe{CStr::from_ptr(rootdir)}.to_string_lossy().as_ref()));
-    let fname = absolute(Path::new(unsafe{CStr::from_ptr(f)}.to_string_lossy().as_ref()));
-    let Ok(rootdir) = rootdir else { return 0 };
-    let Ok(fname) = fname else { return 0 };
+    let rootdir = normalize(unsafe{CStr::from_ptr(rootdir)}.to_string_lossy().as_ref());
+    let fname = normalize(unsafe{CStr::from_ptr(f)}.to_string_lossy().as_ref());
+    let Some(rootdir) = rootdir else { return 0 };
+    let Some(fname) = fname else { return 0 };
     if fname.starts_with(rootdir) { 1 } else { 0 }
+}
+
+/// Absolute path with `.` and `..` resolved lexically.
+/// `std::path::absolute` keeps `..` on Unix, so `root/../x` would start with `root`.
+fn normalize(path: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, PathBuf};
+    if path.is_empty() { return None }
+    let mut out = PathBuf::new();
+    for c in std::path::absolute(path).ok()?.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => { out.pop(); }
+            c => out.push(c),
+        }
+    }
+    Some(out)
 }

@@ -1,65 +1,71 @@
+//! Per-state sandbox options. Pass [`JailOptions`] to [`LuaOptions::jail`].
+//!
+//! [`LuaOptions::jail`]: crate::LuaOptions::jail
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::{fmt, ptr};
 use ffi::{lua_CFunction, lua_State};
 pub use ffi::jail::DebugLibOption;
 
-pub fn jail(options: JailOptions) {
-    use ffi::jail;
+use crate::error::{Error, Result};
 
-    unsafe {
-        free_cstr(jail::set_loadfileroot(options.loadfile_root.map_or(ptr::null(), |root|path_to_ptr(root))));
-        free_cstr(jail::set_ioroot(options.io_root.map_or(ptr::null(), |root|path_to_ptr(root))));
-        if options.deny_load_stdin { jail::deny_load_stdin() } else { jail::allow_load_stdin() };
-        if options.deny_open_stdin { jail::deny_open_stdin() } else { jail::allow_open_stdin() };
-        if options.deny_popen { jail::deny_popen() } else { jail::allow_popen() };
-        if options.deny_exit { jail::deny_exit() } else { jail::allow_exit() };
-        if options.deny_exit { jail::deny_tmp() } else { jail::allow_tmp() };
-        if options.deny_tmp { jail::deny_tmp() } else { jail::allow_tmp() };
-        let getenv_prefix = match options.getenv {
-            GetEnvOption::Prefix(prefix) => {
-                jail::allow_getenv();
-                Some(prefix)
-            },
-            GetEnvOption::AllowAll => {
-                jail::allow_getenv();
-                None
-            }
-            GetEnvOption::DenyAll => {
-                jail::deny_getenv();
-                None
-            },
-        };
-        free_cstr(jail::set_getenv_prefix(getenv_prefix.map_or(ptr::null(), |prefix|std::ffi::CString::new(prefix).unwrap().into_raw())));
-        if options.deny_setlocale { jail::deny_setlocale() } else { jail::allow_setlocale() };
-        if options.deny_collectgarbage { jail::deny_collectgarbage() } else { jail::allow_collectgarbage() };
-        if options.package_lib.deny_require { jail::deny_require() } else { jail::allow_require() };
-        if options.package_lib.deny_loadlib { jail::deny_loadlib() } else { jail::allow_loadlib() };
-        if options.package_lib.deny_searchpath { jail::deny_searchpath() } else { jail::allow_searchpath() };
-        free_cstr(jail::set_path_override(options.package_lib.path_override.map_or(ptr::null(), |s|std::ffi::CString::new(s).unwrap().into_raw())));
-        free_cstr(jail::set_cpath_override(options.package_lib.cpath_override.map_or(ptr::null(), |s|std::ffi::CString::new(s).unwrap().into_raw())));
-        jail::set_package_searchers_modifier_func(options.package_lib.modify_searchers);
-        match options.rep_max_len {
-            Some(max) => jail::set_rep_max(max),
-            None => jail::reset_rep_max(),
-        };
-        if options.deny_time { jail::deny_time() } else { jail::allow_time() };
-        jail::set_clock_precision(0);
-        jail::set_clock_overwrite(match options.os_clock {
-            OsClockOption::Allow => None,
-            OsClockOption::DownPrecision(p) => {
-                jail::set_clock_precision(p);
-                None
-            }
-            OsClockOption::Deny => Some(deny_clock),
-            OsClockOption::Overwrite(f) => Some(f),
-        });
-        jail::set_debug_lib_option(options.debug_lib);
-        // if options.deny_binary_io { jail::deny_binary_io() } else { jail::allow_binary_io() };
-        free_cstr(jail::set_read_extension_allowlist(options.read_extension_allowlist.map_or(ptr::null(), |list|std::ffi::CString::new(build_list(list)).unwrap().into_raw())));
-        free_cstr(jail::set_write_extension_allowlist(options.write_extension_allowlist.map_or(ptr::null(), |list|std::ffi::CString::new(build_list(list)).unwrap().into_raw())));
+/// Sets `options` to the state. The strings are copied by the C side.
+///
+/// Must be called before opening the libraries, since `package.path`, `package.searchers`
+/// and `io.stdin` are set up when the library is opened.
+pub(crate) unsafe fn apply(state: *mut lua_State, options: &JailOptions) -> Result<()> {
+    let loadfile_root = options.loadfile_root.as_ref().map(path_to_cstring);
+    let io_root = options.io_root.as_ref().map(path_to_cstring);
+    let read_extension_allowlist = options.read_extension_allowlist.as_ref().map(build_list).transpose()?;
+    let write_extension_allowlist = options.write_extension_allowlist.as_ref().map(build_list).transpose()?;
+    let (deny_getenv, getenv_prefix) = match &options.getenv {
+        GetEnvOption::AllowAll => (false, None),
+        GetEnvOption::Prefix(prefix) => (false, Some(cstring(prefix)?)),
+        GetEnvOption::DenyAll => (true, None),
+    };
+    let path_override = options.package_lib.path_override.as_deref().map(cstring).transpose()?;
+    let cpath_override = options.package_lib.cpath_override.as_deref().map(cstring).transpose()?;
+    let (clock_precision, clock_overwrite) = match options.os_clock {
+        OsClockOption::Allow => (0, None),
+        OsClockOption::DownPrecision(p) => (p, None),
+        OsClockOption::Deny => (0, Some(deny_clock as lua_CFunction)),
+        OsClockOption::Overwrite(f) => (0, Some(f)),
+    };
+
+    let opt = ffi::jail::JailOption {
+        loadfile_root: as_ptr(&loadfile_root),
+        ioroot: as_ptr(&io_root),
+        read_extension_allowlist: as_ptr(&read_extension_allowlist),
+        write_extension_allowlist: as_ptr(&write_extension_allowlist),
+        getenv_prefix: as_ptr(&getenv_prefix),
+        path_override: as_ptr(&path_override),
+        cpath_override: as_ptr(&cpath_override),
+        package_searchers_modifier: options.package_lib.modify_searchers,
+        clock_overwrite,
+        rep_max: options.rep_max_len.unwrap_or(0),
+        rep_max_limited: options.rep_max_len.is_some() as c_int,
+        clock_precision,
+        deny_load_stdin: options.deny_load_stdin as u8,
+        deny_open_stdin: options.deny_open_stdin as u8,
+        deny_popen: options.deny_popen as u8,
+        deny_exit: options.deny_exit as u8,
+        deny_tmp: options.deny_tmp as u8,
+        deny_getenv: deny_getenv as u8,
+        deny_setlocale: options.deny_setlocale as u8,
+        deny_collectgarbage: options.deny_collectgarbage as u8,
+        deny_require: options.package_lib.deny_require as u8,
+        deny_loadlib: options.package_lib.deny_loadlib as u8,
+        deny_searchpath: options.package_lib.deny_searchpath as u8,
+        deny_time: options.deny_time as u8,
+        debug_option: (&options.debug_lib).into(),
+    };
+    if ffi::jail::lua_setjail(state, &opt, size_of::<ffi::jail::JailOption>()) != 0 {
+        return Err(Error::MemoryError("cannot set jail options".to_string()));
     }
+    Ok(())
 }
-#[derive(Debug, Default)]
+
+#[derive(Debug, Default, Clone)]
 pub enum GetEnvOption {
     #[default] AllowAll,
     Prefix(String),
@@ -68,7 +74,7 @@ pub enum GetEnvOption {
 
 type lua_ModifyFunction = unsafe extern "C-unwind" fn(L: *mut lua_State);
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PackageLibOption {
     pub deny_require: bool,
     pub deny_loadlib: bool,
@@ -80,6 +86,7 @@ pub struct PackageLibOption {
     /// # Example
     /// ```
     /// use std::os::raw::{c_char, c_int};
+    /// use mlua::{Lua, LuaOptions, StdLib};
     /// use mlua::jail::{JailOptions, PackageLibOption};
     /// use mlua::ffi::lua_State;
     ///
@@ -98,14 +105,14 @@ pub struct PackageLibOption {
     ///     }
     /// }
     ///
-    ///     mlua::jail::jail(JailOptions {
-    ///         package_lib: PackageLibOption {
-    ///             modify_searchers: Some(drop_all_searchers),
-    ///             ..Default::default()
-    ///         },
+    /// let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::new().jail(JailOptions {
+    ///     package_lib: PackageLibOption {
+    ///         modify_searchers: Some(drop_all_searchers),
     ///         ..Default::default()
-    ///     });
-    ///
+    ///     },
+    ///     ..Default::default()
+    /// }));
+    /// ```
     pub modify_searchers: Option<lua_ModifyFunction>,
 }
 impl PackageLibOption {
@@ -121,7 +128,7 @@ impl PackageLibOption {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub enum OsClockOption {
     #[default] Allow,
     /// limit precision of os.clock()
@@ -159,7 +166,7 @@ unsafe extern "C-unwind" fn deny_clock(L: *mut lua_State) -> c_int {
     return 1;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct JailOptions {
     pub loadfile_root: Option<std::path::PathBuf>,
     pub io_root: Option<std::path::PathBuf>,
@@ -176,7 +183,6 @@ pub struct JailOptions {
     pub deny_time: bool,
     pub os_clock: OsClockOption,
     pub debug_lib: DebugLibOption,
-    // pub deny_binary_io: bool,
     pub read_extension_allowlist: Option<Vec<String>>,
     pub write_extension_allowlist: Option<Vec<String>>,
 }
@@ -198,7 +204,6 @@ impl JailOptions {
             deny_time: true,
             os_clock: OsClockOption::Deny,
             debug_lib: DebugLibOption::deny_all(),
-            // deny_binary_io: true,
             read_extension_allowlist: Some(vec![]),
             write_extension_allowlist: Some(vec![]),
         }
@@ -210,6 +215,7 @@ impl fmt::Debug for PackageLibOption {
         f.debug_struct("PackageLibOption")
             .field("deny_require", &self.deny_require)
             .field("deny_loadlib", &self.deny_loadlib)
+            .field("deny_searchpath", &self.deny_searchpath)
             .field("path_override", &self.path_override)
             .field("cpath_override", &self.cpath_override)
             .field("modify_searchers", &format_args!(
@@ -224,18 +230,21 @@ impl fmt::Debug for PackageLibOption {
     }
 }
 
-fn free_cstr(ptr: *mut c_char) {
-    if ptr.is_null() { return; }
-    let _ = unsafe { std::ffi::CString::from_raw(ptr) };
+fn cstring(s: &str) -> Result<CString> {
+    CString::new(s).map_err(|e| Error::RuntimeError(format!("invalid jail option: {e}")))
 }
-fn path_to_ptr(path: std::path::PathBuf) -> *const c_char {
-    use std::ffi::CString;
+fn as_ptr(s: &Option<CString>) -> *const c_char {
+    s.as_ref().map_or(ptr::null(), |s| s.as_ptr())
+}
+fn path_to_cstring(path: &std::path::PathBuf) -> CString {
     if let Some(path) = path.to_str() {
         if let Ok(path) = CString::new(path) {
-            return path.into_raw()
+            return path
         }
     }
     // is_in_dir("", path) always returns false
-    CString::new("").unwrap().into_raw()
+    CString::default()
 }
-fn build_list(list: Vec<String>) -> String { format!(",{},",  list.join(",").to_ascii_lowercase()) }
+fn build_list(list: &Vec<String>) -> Result<CString> {
+    cstring(&format!(",{},", list.join(",").to_ascii_lowercase()))
+}

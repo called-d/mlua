@@ -148,6 +148,11 @@ impl RawLua {
         }
         assert!(!state.is_null(), "Failed to create a Lua VM");
 
+        #[cfg(all(feature = "lua54", feature = "vendored"))]
+        if let Some(jail) = &options.jail {
+            mlua_expect!(crate::jail::apply(state, jail), "Error applying jail options");
+        }
+
         ffi::luaL_requiref(state, cstr!("_G"), ffi::luaopen_base, 1);
         ffi::lua_pop(state, 1);
 

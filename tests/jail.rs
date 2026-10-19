@@ -1,4 +1,4 @@
-#![cfg(all(feature = "lua54", feature = "vendored"))]
+#![cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))]
 
 use std::path::PathBuf;
 

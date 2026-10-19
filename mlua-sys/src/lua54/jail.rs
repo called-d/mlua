@@ -125,7 +125,7 @@ impl From<&DebugLibOption> for DebugLibJailOption {
     }
 }
 
-#[cfg_attr(all(windows, raw_dylib), link(name = "lua54", kind = "raw-dylib"))]
+// jail is only available with the vendored Lua (lua-src), so no raw-dylib linking here
 unsafe extern "C-unwind" {
     /// Copies `opt` into the state (null clears). Returns non-zero on failure.
     pub fn lua_setjail(L: *mut lua_State, opt: *const JailOption, size: usize) -> c_int;

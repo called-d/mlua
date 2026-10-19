@@ -229,8 +229,8 @@ pub struct LuaOptions {
     /// Sandbox options of this state, set before opening the standard libraries.
     ///
     /// Default: **None**
-    #[cfg(all(feature = "lua54", feature = "vendored"))]
-    #[cfg_attr(docsrs, doc(cfg(all(feature = "lua54", feature = "vendored"))))]
+    #[cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))]
+    #[cfg_attr(docsrs, doc(cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))))]
     pub jail: Option<crate::jail::JailOptions>,
 }
 
@@ -247,7 +247,7 @@ impl LuaOptions {
             catch_rust_panics: true,
             #[cfg(feature = "async")]
             thread_pool_size: 0,
-            #[cfg(all(feature = "lua54", feature = "vendored"))]
+            #[cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))]
             jail: None,
         }
     }
@@ -275,8 +275,8 @@ impl LuaOptions {
     /// Sets [`jail`] option.
     ///
     /// [`jail`]: #structfield.jail
-    #[cfg(all(feature = "lua54", feature = "vendored"))]
-    #[cfg_attr(docsrs, doc(cfg(all(feature = "lua54", feature = "vendored"))))]
+    #[cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))]
+    #[cfg_attr(docsrs, doc(cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))))]
     #[must_use]
     pub fn jail(mut self, options: crate::jail::JailOptions) -> Self {
         self.jail = Some(options);

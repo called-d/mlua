@@ -148,7 +148,7 @@ impl RawLua {
         }
         assert!(!state.is_null(), "Failed to create a Lua VM");
 
-        #[cfg(all(feature = "lua54", feature = "vendored"))]
+        #[cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))]
         if let Some(jail) = &options.jail {
             mlua_expect!(crate::jail::apply(state, jail), "Error applying jail options");
         }

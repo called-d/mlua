@@ -74,6 +74,8 @@ pub(crate) unsafe fn denies_binary_chunk(state: *mut lua_State) -> bool {
 #[derive(Debug, Default, Clone)]
 pub enum GetEnvOption {
     #[default] AllowAll,
+    /// Only variables whose name starts with this. On Windows, ASCII letters are compared
+    /// ignoring case, as Windows does for environment variable names
     Prefix(String),
     DenyAll,
 }

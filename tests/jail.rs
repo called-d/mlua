@@ -362,3 +362,47 @@ fn test_jail_tmp_dir() -> Result<()> {
     assert!(!lua.load(open_tmpname).eval::<bool>()?);
     Ok(())
 }
+
+/// Sets a variable where Lua's `os.getenv` sees it. On Windows the CRT keeps its own copy of the
+/// environment, which `std::env::set_var` (SetEnvironmentVariableW) does not update
+fn set_env(name: &str, value: &str) {
+    #[cfg(windows)]
+    {
+        unsafe extern "C" {
+            fn _putenv_s(name: *const std::ffi::c_char, value: *const std::ffi::c_char) -> i32;
+        }
+        let name = std::ffi::CString::new(name).unwrap();
+        let value = std::ffi::CString::new(value).unwrap();
+        assert_eq!(unsafe { _putenv_s(name.as_ptr(), value.as_ptr()) }, 0);
+    }
+    #[cfg(not(windows))]
+    // SAFETY: no other test reads or writes these variables
+    unsafe {
+        std::env::set_var(name, value)
+    };
+}
+
+#[test]
+fn test_jail_getenv_prefix() -> Result<()> {
+    set_env("MLUA_JAIL_TEST_ALLOWED", "yes");
+    set_env("MLUA_JAIL_OTHER", "no");
+    let lua = jailed(JailOptions {
+        getenv: GetEnvOption::Prefix("MLUA_JAIL_TEST_".to_string()),
+        ..Default::default()
+    });
+    let getenv = |name: &str| -> Result<Option<String>> {
+        lua.load("return os.getenv(...)").call(name)
+    };
+    assert_eq!(getenv("MLUA_JAIL_TEST_ALLOWED")?.as_deref(), Some("yes"));
+    assert_eq!(getenv("MLUA_JAIL_OTHER")?, None);
+    assert_eq!(getenv("MLUA_JAIL_TEST")?, None);
+    assert_eq!(getenv("PATH")?, None);
+    // Windows does not distinguish the case of variable names
+    let lower = getenv("mlua_jail_test_allowed")?;
+    if cfg!(windows) {
+        assert_eq!(lower.as_deref(), Some("yes"));
+    } else {
+        assert_eq!(lower, None);
+    }
+    Ok(())
+}

@@ -691,6 +691,12 @@ impl Chunk<'_> {
     pub(crate) fn try_cache(mut self) -> Self {
         struct ChunksCache(HashMap<Vec<u8>, Vec<u8>>);
 
+        // A jailed state may refuse binary chunks, so keep loading the text
+        #[cfg(all(any(feature = "lua54", feature = "lua55"), feature = "vendored"))]
+        if unsafe { crate::jail::denies_binary_chunk(self.lua.lock().main_state()) } {
+            return self;
+        }
+
         // Try to fetch compiled chunk from cache
         let mut text_source = None;
         if let Ok(ref source) = self.source

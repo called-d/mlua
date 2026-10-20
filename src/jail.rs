@@ -57,12 +57,18 @@ pub(crate) unsafe fn apply(state: *mut lua_State, options: &JailOptions) -> Resu
         deny_loadlib: options.package_lib.deny_loadlib as u8,
         deny_searchpath: options.package_lib.deny_searchpath as u8,
         deny_time: options.deny_time as u8,
+        deny_binary_chunk: options.deny_binary_chunk as u8,
         debug_option: (&options.debug_lib).into(),
     };
     if ffi::jail::lua_setjail(state, &opt, size_of::<ffi::jail::JailOption>()) != 0 {
         return Err(Error::MemoryError("cannot set jail options".to_string()));
     }
     Ok(())
+}
+
+/// Whether the state refuses binary chunks ([`JailOptions::deny_binary_chunk`]).
+pub(crate) unsafe fn denies_binary_chunk(state: *mut lua_State) -> bool {
+    (*ffi::jail::lua_getjail(state)).deny_binary_chunk != 0
 }
 
 #[derive(Debug, Default, Clone)]
@@ -181,6 +187,11 @@ pub struct JailOptions {
     pub package_lib: PackageLibOption,
     pub rep_max_len: Option<usize>,
     pub deny_time: bool,
+    /// Denies loading precompiled chunks with `load` / `loadfile` / `dofile` / `require`
+    /// (and [`Lua::load`] from Rust). `string.dump` is still allowed.
+    ///
+    /// [`Lua::load`]: crate::Lua::load
+    pub deny_binary_chunk: bool,
     pub os_clock: OsClockOption,
     pub debug_lib: DebugLibOption,
     pub read_extension_allowlist: Option<Vec<String>>,
@@ -202,6 +213,7 @@ impl JailOptions {
             package_lib: PackageLibOption::deny_all(),
             rep_max_len: Some(1024),
             deny_time: true,
+            deny_binary_chunk: true,
             os_clock: OsClockOption::Deny,
             debug_lib: DebugLibOption::deny_all(),
             read_extension_allowlist: Some(vec![]),

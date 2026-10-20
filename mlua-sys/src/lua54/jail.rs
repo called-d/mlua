@@ -55,6 +55,7 @@ pub struct JailOption {
     pub deny_loadlib: c_uchar,
     pub deny_searchpath: c_uchar,
     pub deny_time: c_uchar,
+    pub deny_binary_chunk: c_uchar,
     pub debug_option: DebugLibJailOption,
 }
 

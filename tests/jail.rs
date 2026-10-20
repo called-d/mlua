@@ -132,3 +132,58 @@ fn test_jail_threads() {
         h.join().unwrap();
     }
 }
+
+#[test]
+fn test_jail_binary_chunk() -> Result<()> {
+    let dir = temp_dir("binary");
+    let file = dir.join("f.luac");
+    let free = Lua::new();
+    let bytecode: mlua::LuaString = free.load("return string.dump(function() return 42 end)").eval()?;
+    std::fs::write(&file, bytecode.as_bytes()).unwrap();
+
+    let lua = jailed(JailOptions {
+        deny_binary_chunk: true,
+        ..Default::default()
+    });
+    lua.globals().set("bytecode", lua.create_string(bytecode.as_bytes())?)?;
+    lua.globals().set("file", file.to_str().unwrap())?;
+    // load returns nil + message, loadfile too, dofile raises
+    let (f, err): (Option<mlua::Function>, String) = lua.load("return load(bytecode)").eval()?;
+    assert!(f.is_none());
+    assert!(err.contains("binary chunk"), "{err}");
+    let (f, err): (Option<mlua::Function>, String) = lua.load("return loadfile(file)").eval()?;
+    assert!(f.is_none());
+    assert!(err.contains("binary chunk"), "{err}");
+    assert!(lua.load("dofile(file)").exec().is_err());
+    assert!(lua.load(&*bytecode.as_bytes()).exec().is_err());
+    // text chunks and string.dump are not affected
+    let n: i32 = lua.load("return load('return 1')()").eval()?;
+    assert_eq!(n, 1);
+    let _: mlua::LuaString = lua.load("return string.dump(function() end)").eval()?;
+
+    // not jailed
+    let n: i32 = free.load("return load(...)()").call(bytecode)?;
+    assert_eq!(n, 42);
+    Ok(())
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn test_jail_binary_chunk_async() -> Result<()> {
+    // mlua caches its internal chunks as bytecode; they must still load
+    let lua = jailed(JailOptions {
+        deny_binary_chunk: true,
+        ..Default::default()
+    });
+    let f = lua.create_async_function(|_, n: i32| async move { Ok(n + 1) })?;
+    for i in 0..3 {
+        let n: i32 = f.call_async(i).await?;
+        assert_eq!(n, i + 1);
+    }
+    let bound = f.bind(1)?;
+    let n: i32 = bound.call_async(()).await?;
+    assert_eq!(n, 2);
+    let n: i32 = bound.call_async(()).await?;
+    assert_eq!(n, 2);
+    Ok(())
+}

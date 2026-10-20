@@ -142,20 +142,31 @@ unsafe extern "C-unwind" {
     contains(Path::new(rootdir), &fname) as c_int
 }
 
-/// Called from jail.c. The directory of `os.tmpname`.
+/// Called from jail.c. Files directly in the directory of `os.tmpname`, which is where it puts
+/// its names. Not subdirectories nor directories, since the temporary directory is shared with
+/// other programs (and is the user profile on Windows when TMP and TEMP are unset).
 #[unsafe(no_mangle)] pub extern "C" fn is_in_tmp_dir (f: *const c_char) -> c_int {
     let Some(fname) = fopen_path(unsafe{CStr::from_ptr(f)}) else { return 0 };
     #[cfg(windows)] let tmp = std::env::temp_dir();
     #[cfg(not(windows))] let tmp = PathBuf::from("/tmp");
-    contains(&tmp, &fname) as c_int
+    if !contains(&tmp, &fname) { return 0 }
+    let (Ok(tmp_r), Some(f_r)) = (std::fs::canonicalize(&tmp), resolve(&fname)) else { return 0 };
+    (f_r.parent() == Some(tmp_r.as_path()) && !f_r.is_dir()) as c_int
 }
 
 /// Both lexically (`..`, and device names on Windows) and with links resolved.
 fn contains(root: &Path, f: &Path) -> bool {
+    if has_stream_name(f) { return false }
     let (Some(root_n), Some(f_n)) = (normalize(root), normalize(f)) else { return false };
     if !f_n.starts_with(root_n) { return false }
     let (Ok(root_r), Some(f_r)) = (std::fs::canonicalize(root), resolve(f)) else { return false };
     f_r.starts_with(root_r)
+}
+
+/// `name:stream` on Windows: an alternate data stream of `name`, whose extension is not the one
+/// the allowlist sees. The drive (`C:`) is in the prefix, not in a normal component.
+fn has_stream_name(f: &Path) -> bool {
+    cfg!(windows) && f.components().any(|c| matches!(c, Component::Normal(s) if s.as_encoded_bytes().contains(&b':')))
 }
 
 /// Absolute path with `.` and `..` resolved lexically.

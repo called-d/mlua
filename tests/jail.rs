@@ -363,6 +363,63 @@ fn test_jail_tmp_dir() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_jail_tmp_dir_direct_files_only() -> Result<()> {
+    let root = temp_dir("tmp-root");
+    let tmp = std::env::temp_dir();
+    let pid = std::process::id();
+    let direct = tmp.join(format!("mlua-jail-{pid}-direct.txt"));
+    std::fs::write(&direct, "d").unwrap();
+    let sub = temp_dir("tmp-sub");
+    std::fs::write(sub.join("x.txt"), "s").unwrap();
+
+    let lua = jailed(JailOptions {
+        io_root: Some(root),
+        ..Default::default()
+    });
+    let remove = |path: &std::path::Path| -> Result<bool> {
+        lua.load("return os.remove(...) ~= nil").call(path.to_str().unwrap())
+    };
+    assert!(can_open(&lua, &direct)?);
+    assert!(!can_open(&lua, &sub.join("x.txt"))?);
+    // directories directly in the temporary directory cannot be removed or renamed
+    assert!(!remove(&sub)?);
+    assert!(sub.exists());
+    let renamed: bool = lua
+        .load("return os.rename(...) ~= nil")
+        .call((sub.to_str().unwrap(), tmp.join(format!("mlua-jail-{pid}-renamed")).to_str().unwrap()))?;
+    assert!(!renamed);
+    assert!(sub.exists());
+    // can_open leaves `direct` open, which Windows does not let us remove
+    let to_remove = tmp.join(format!("mlua-jail-{pid}-remove.txt"));
+    std::fs::write(&to_remove, "r").unwrap();
+    assert!(remove(&to_remove)?);
+    assert!(!to_remove.exists());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn test_jail_alternate_data_stream() -> Result<()> {
+    let root = temp_dir("ads");
+    std::fs::write(root.join("data.json"), "{}").unwrap();
+    let stream = root.join("data.json:x.txt");
+
+    let lua = jailed(JailOptions {
+        io_root: Some(root.clone()),
+        deny_tmp: true,
+        ..Default::default()
+    });
+    assert!(!can_open_mode(&lua, &stream, "w")?);
+    assert!(!can_open_mode(&lua, &root.join("data.json:x.txt:$DATA"), "w")?);
+    // the drive letter is not a stream
+    assert!(can_open_mode(&lua, &root.join("data.json"), "r")?);
+    // without io_root, nothing changes
+    let free = jailed(JailOptions::default());
+    assert!(can_open_mode(&free, &stream, "w")?);
+    Ok(())
+}
+
 /// Sets a variable where Lua's `os.getenv` sees it. On Windows the CRT keeps its own copy of the
 /// environment, which `std::env::set_var` (SetEnvironmentVariableW) does not update
 fn set_env(name: &str, value: &str) {

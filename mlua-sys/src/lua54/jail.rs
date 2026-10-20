@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uchar};
+use std::path::{Component, Path, PathBuf};
 use crate::{lua_CFunction, lua_State};
 
 pub type lua_ModifyFunction = unsafe extern "C-unwind" fn(L: *mut lua_State);
@@ -134,20 +135,33 @@ unsafe extern "C-unwind" {
     pub fn lua_getjail(L: *mut lua_State) -> *const JailOption;
 }
 
-/// Called from jail.c
+/// Called from jail.c. `rootdir` is UTF-8 (from [`JailOption`]), `f` is a name passed to `fopen`.
 #[unsafe(no_mangle)] pub extern "C" fn is_in_dir (rootdir: *const c_char, f: *const c_char) -> c_int {
-    let rootdir = normalize(unsafe{CStr::from_ptr(rootdir)}.to_string_lossy().as_ref());
-    let fname = normalize(unsafe{CStr::from_ptr(f)}.to_string_lossy().as_ref());
-    let Some(rootdir) = rootdir else { return 0 };
-    let Some(fname) = fname else { return 0 };
-    if fname.starts_with(rootdir) { 1 } else { 0 }
+    let Ok(rootdir) = unsafe{CStr::from_ptr(rootdir)}.to_str() else { return 0 };
+    let Some(fname) = fopen_path(unsafe{CStr::from_ptr(f)}) else { return 0 };
+    contains(Path::new(rootdir), &fname) as c_int
+}
+
+/// Called from jail.c. The directory of `os.tmpname`.
+#[unsafe(no_mangle)] pub extern "C" fn is_in_tmp_dir (f: *const c_char) -> c_int {
+    let Some(fname) = fopen_path(unsafe{CStr::from_ptr(f)}) else { return 0 };
+    #[cfg(windows)] let tmp = std::env::temp_dir();
+    #[cfg(not(windows))] let tmp = PathBuf::from("/tmp");
+    contains(&tmp, &fname) as c_int
+}
+
+/// Both lexically (`..`, and device names on Windows) and with links resolved.
+fn contains(root: &Path, f: &Path) -> bool {
+    let (Some(root_n), Some(f_n)) = (normalize(root), normalize(f)) else { return false };
+    if !f_n.starts_with(root_n) { return false }
+    let (Ok(root_r), Some(f_r)) = (std::fs::canonicalize(root), resolve(f)) else { return false };
+    f_r.starts_with(root_r)
 }
 
 /// Absolute path with `.` and `..` resolved lexically.
 /// `std::path::absolute` keeps `..` on Unix, so `root/../x` would start with `root`.
-fn normalize(path: &str) -> Option<std::path::PathBuf> {
-    use std::path::{Component, PathBuf};
-    if path.is_empty() { return None }
+fn normalize(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() { return None }
     let mut out = PathBuf::new();
     for c in std::path::absolute(path).ok()?.components() {
         match c {
@@ -157,4 +171,65 @@ fn normalize(path: &str) -> Option<std::path::PathBuf> {
         }
     }
     Some(out)
+}
+
+/// The file `fopen` would reach: links (and 8.3 names on Windows) resolved.
+/// Only the last component may be missing (a file to be created), and it must not be a link.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(path) { return Some(p) }
+    // a dangling link would be followed by "w"
+    if std::fs::symlink_metadata(path).is_ok() { return None }
+    let name = path.file_name()?;
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    Some(std::fs::canonicalize(parent).ok()?.join(name))
+}
+
+/// The file name as `fopen` decodes it.
+#[cfg(unix)]
+fn fopen_path(s: &CStr) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(s.to_bytes())))
+}
+
+/// The file name as `fopen` decodes it: UTF-8 if the C locale is UTF-8, otherwise the code page
+/// of the Win32 A functions (as UCRT does). A lead byte of CP932 etc. can take a following `\`.
+#[cfg(windows)]
+fn fopen_path(s: &CStr) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    const CP_ACP: u32 = 0;
+    const CP_OEMCP: u32 = 1;
+    const CP_UTF8: u32 = 65001;
+    const MB_ERR_INVALID_CHARS: u32 = 0x8;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AreFileApisANSI() -> i32;
+        fn MultiByteToWideChar(cp: u32, flags: u32, s: *const c_char, n: i32, w: *mut u16, wn: i32) -> i32;
+    }
+    unsafe extern "C" {
+        /// code page of the current C locale (UCRT, msvcrt)
+        fn ___lc_codepage_func() -> u32;
+    }
+    let n = i32::try_from(s.to_bytes().len()).ok()?;
+    if n == 0 { return None }
+    let cp = unsafe {
+        if ___lc_codepage_func() == CP_UTF8 { CP_UTF8 }
+        else if AreFileApisANSI() != 0 { CP_ACP }
+        else { CP_OEMCP }
+    };
+    // invalid sequences: fopen fails or decodes them differently, so refuse
+    let len = unsafe { MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, s.as_ptr(), n, std::ptr::null_mut(), 0) };
+    if len <= 0 { return None }
+    let mut wide = vec![0u16; len as usize];
+    let len = unsafe { MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, s.as_ptr(), n, wide.as_mut_ptr(), len) };
+    if len <= 0 { return None }
+    wide.truncate(len as usize);
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn fopen_path(s: &CStr) -> Option<PathBuf> {
+    s.to_str().ok().map(PathBuf::from)
 }

@@ -187,3 +187,178 @@ async fn test_jail_binary_chunk_async() -> Result<()> {
     assert_eq!(n, 2);
     Ok(())
 }
+
+#[test]
+fn test_jail_closed_stdin() -> Result<()> {
+    // io.stdin is a closed handle: reading it must be a Lua error, not a crash
+    let lua = jailed(JailOptions {
+        deny_open_stdin: true,
+        ..Default::default()
+    });
+    assert!(lua.load("io.read()").exec().is_err());
+    assert!(lua.load("io.stdin:read()").exec().is_err());
+    assert!(lua.load("for _ in io.lines() do end").exec().is_err());
+    let s: String = lua.load("return tostring(io.stdin)").eval()?;
+    assert_eq!(s, "file (closed)");
+    Ok(())
+}
+
+/// `io.open(path, mode)` passes the jail (and fopen)
+fn can_open_mode(lua: &Lua, path: &std::path::Path, mode: &str) -> Result<bool> {
+    lua.load("local ok, f = pcall(io.open, ...) if ok and f then f:close() end return ok and f ~= nil")
+        .call((path.to_str().unwrap(), mode))
+}
+
+#[test]
+fn test_jail_open_mode() -> Result<()> {
+    let dir = temp_dir("mode");
+    std::fs::write(dir.join("r.txt"), "r").unwrap();
+    std::fs::write(dir.join("w.log"), "w").unwrap();
+    let lua = jailed(JailOptions {
+        io_root: Some(dir.clone()),
+        deny_tmp: true,
+        read_extension_allowlist: Some(vec!["txt".into()]),
+        write_extension_allowlist: Some(vec!["log".into()]),
+        ..Default::default()
+    });
+    assert!(can_open_mode(&lua, &dir.join("r.txt"), "r")?);
+    assert!(can_open_mode(&lua, &dir.join("r.txt"), "rb")?);
+    assert!(can_open_mode(&lua, &dir.join("w.log"), "w")?);
+    assert!(can_open_mode(&lua, &dir.join("w.log"), "a")?);
+    // '+' reads and writes, so both lists must allow it
+    for mode in ["r+", "r+b", "w+", "a+", "a+b"] {
+        assert!(!can_open_mode(&lua, &dir.join("r.txt"), mode)?, "{mode}");
+        assert!(!can_open_mode(&lua, &dir.join("w.log"), mode)?, "{mode}");
+    }
+    assert_eq!(std::fs::read_to_string(dir.join("r.txt")).unwrap(), "r");
+    Ok(())
+}
+
+#[test]
+fn test_jail_rename_extension() -> Result<()> {
+    let dir = temp_dir("rename");
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+    std::fs::write(dir.join("b.dat"), "b").unwrap();
+    let lua = jailed(JailOptions {
+        io_root: Some(dir.clone()),
+        deny_tmp: true,
+        write_extension_allowlist: Some(vec!["txt".into()]),
+        ..Default::default()
+    });
+    let rename = |from: &str, to: &str| -> Result<bool> {
+        lua.load("return os.rename(...) ~= nil")
+            .call((dir.join(from).to_str().unwrap(), dir.join(to).to_str().unwrap()))
+    };
+    assert!(!rename("a.txt", "a.lua")?);
+    assert!(!rename("b.dat", "b.txt")?);
+    assert!(rename("a.txt", "c.txt")?);
+    assert!(dir.join("c.txt").exists() && dir.join("b.dat").exists());
+
+    // directories are not checked
+    std::fs::create_dir(dir.join("d")).unwrap();
+    std::fs::write(dir.join("f"), "f").unwrap();
+    assert!(rename("d", ".d2")?);
+    assert!(rename(".d2", "d.lua")?);
+    // a file without an extension is
+    assert!(!rename("f", "f2")?);
+    assert!(dir.join("d.lua").is_dir() && dir.join("f").exists());
+    Ok(())
+}
+
+#[test]
+fn test_jail_long_extension() -> Result<()> {
+    // an extension longer than the buffer must not be compared truncated
+    let ext = "a".repeat(255);
+    let lua = jailed(JailOptions {
+        write_extension_allowlist: Some(vec![ext.clone()]),
+        ..Default::default()
+    });
+    let passes = |name: String| -> Result<bool> {
+        lua.load("return (pcall(io.open, ..., 'w'))").call(name)
+    };
+    // the jail passes it, then fopen fails (too long for a file name)
+    assert!(passes(format!("x.{ext}"))?);
+    assert!(!passes(format!("x.{ext}aaa"))?);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn test_jail_ansi_path() -> Result<()> {
+    // in CP932, 0x95 0x5C is one character: fopen sees `a?b\..\..` (two levels up
+    // from root), while a UTF-8 view sees `a?\b\..\..` (stays in root)
+    let root = temp_dir("ansi").join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.parent().unwrap().join("secret.txt"), "s").unwrap();
+    let lua = jailed(JailOptions {
+        io_root: Some(root.clone()),
+        deny_tmp: true,
+        ..Default::default()
+    });
+    let mut path = root.to_str().unwrap().as_bytes().to_vec();
+    path.extend_from_slice(b"\\a\x95\\b\\..\\..\\secret.txt");
+    let opened: bool = lua.load("return io.open(...) ~= nil").call(lua.create_string(&path)?)?;
+    assert!(!opened);
+    Ok(())
+}
+
+#[test]
+fn test_jail_link() -> Result<()> {
+    let base = temp_dir("link");
+    let root = base.join("root");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "s").unwrap();
+    std::fs::write(root.join("ok.txt"), "o").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+    #[cfg(windows)]
+    {
+        // a junction does not need the privilege for symbolic links
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("link"))
+            .arg(&outside)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let lua = jailed(JailOptions {
+        io_root: Some(root.clone()),
+        deny_tmp: true,
+        ..Default::default()
+    });
+    assert!(can_open(&lua, &root.join("ok.txt"))?);
+    assert!(can_open_mode(&lua, &root.join("new.txt"), "w")?);
+    assert!(!can_open(&lua, &root.join("link").join("secret.txt"))?);
+    assert!(!can_open_mode(&lua, &root.join("link").join("new.txt"), "w")?);
+    assert!(!outside.join("new.txt").exists());
+    #[cfg(unix)]
+    {
+        // a dangling link would be followed by fopen "w"
+        std::os::unix::fs::symlink(outside.join("dangling.txt"), root.join("dangling.txt")).unwrap();
+        assert!(!can_open_mode(&lua, &root.join("dangling.txt"), "w")?);
+        assert!(!outside.join("dangling.txt").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn test_jail_tmp_dir() -> Result<()> {
+    let root = temp_dir("tmp");
+    let open_tmpname = "local name = os.tmpname() local f = io.open(name, 'w') if f then f:close() os.remove(name) end return f ~= nil";
+    let lua = jailed(JailOptions {
+        io_root: Some(root.clone()),
+        ..Default::default()
+    });
+    assert!(lua.load(open_tmpname).eval::<bool>()?);
+    let lua = jailed(JailOptions {
+        io_root: Some(root),
+        deny_tmp: true,
+        ..Default::default()
+    });
+    assert!(!lua.load(open_tmpname).eval::<bool>()?);
+    Ok(())
+}

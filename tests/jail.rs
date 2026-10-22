@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use mlua::jail::{GetEnvOption, JailOptions, PackageLibOption};
-use mlua::{Lua, LuaOptions, Result, StdLib};
+use mlua::{Error, HookTriggers, Lua, LuaOptions, MultiValue, Result, StdLib, Value, VmState};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mlua-jail-{}-{name}", std::process::id()));
@@ -104,6 +104,42 @@ fn test_jail_rep_max() -> Result<()> {
     // string.packsize is not limited
     let size: usize = lua.load("return string.packsize('i16')").eval()?;
     assert_eq!(size, 16);
+    Ok(())
+}
+
+// backtracks for a very long time
+const PATTERN_BLOWUP: &str = r#"return string.rep("a", 1000):find(string.rep("a-", 20) .. "b")"#;
+
+#[test]
+fn test_count_hook_stops_pattern_matching() {
+    let lua = Lua::new();
+    lua.set_hook(HookTriggers::new().every_nth_instruction(1000), |_, _| {
+        Err(Error::runtime("interrupted"))
+    })
+    .unwrap();
+    let result = lua.load(PATTERN_BLOWUP).exec();
+    assert!(matches!(result, Err(Error::RuntimeError(err)) if err.contains("interrupted")));
+}
+
+#[test]
+fn test_count_hook_cannot_yield_in_pattern_matching() -> Result<()> {
+    let lua = Lua::new();
+    let func = lua
+        .load(r#"return (string.rep("a", 50) .. "b"):find("a-a-b")"#)
+        .into_function()?;
+    let co = lua.create_thread(func)?;
+    co.set_hook(HookTriggers::new().every_nth_instruction(1), |_, _| Ok(VmState::Yield))?;
+    // yields only between the instructions of Lua, and find returns as usual
+    let mut resumes = 0;
+    let result = loop {
+        let result: MultiValue = co.resume(())?;
+        if co.is_finished() {
+            break result;
+        }
+        resumes += 1;
+        assert!(resumes < 100, "yielded inside pattern matching");
+    };
+    assert_eq!(result.into_vec(), vec![Value::Integer(1), Value::Integer(51)]);
     Ok(())
 }
 
